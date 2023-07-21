@@ -1,5 +1,5 @@
 use std::fmt;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::net::{self, SocketAddr, TcpStream, ToSocketAddrs};
 use std::ops::DerefMut;
 use std::path::PathBuf;
@@ -906,6 +906,12 @@ impl Connection {
         self.read_response()
     }
 
+    /// Fetches raw data from the connection.  This is useful
+    /// if user wants to parse the response by himself.
+    pub fn recv_response_raw(&mut self, length: usize) -> RedisResult<Vec<u8>> {
+        self.read_response_raw(length)
+    }
+
     /// Sets the write timeout for the connection.
     ///
     /// If the provided value is `None`, then `send_packed_command` call will
@@ -1042,6 +1048,40 @@ impl Connection {
                         let _ = connection.sock.shutdown(net::Shutdown::Both);
                         connection.open = false;
                     }
+                }
+            }
+        }
+        result
+    }
+
+    /// Fetches raw bytes from the connection.
+    fn read_response_raw(&mut self, length: usize) -> RedisResult<Vec<u8>> {
+        let result = match self.con {
+            ActualConnection::Tcp(TcpConnection { ref mut reader, .. }) => {
+                let mut buf = vec![0; length];
+                reader.read_exact(&mut buf)?;
+                RedisResult::Ok(buf)
+            }
+            _ => {
+                return Err(RedisError::from((
+                    ErrorKind::InvalidClientConfig,
+                    "Raw commands are not supported for this connection type",
+                )))
+            }
+        };
+        // shutdown connection on protocol error
+        if let Err(e) = &result {
+            let shutdown = match e.as_io_error() {
+                Some(e) => e.kind() == io::ErrorKind::UnexpectedEof,
+                None => false,
+            };
+            if shutdown {
+                match self.con {
+                    ActualConnection::Tcp(ref mut connection) => {
+                        let _ = connection.reader.shutdown(net::Shutdown::Both);
+                        connection.open = false;
+                    }
+                    _ => (),
                 }
             }
         }
